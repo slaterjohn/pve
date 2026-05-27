@@ -148,7 +148,7 @@ choose_options() {
   # Detect current SSH port from sshd_config
   local detected_port
   detected_port="$(sshd -T 2>/dev/null | awk '/^port / {print $2; exit}' || echo 22)"
-  CURRENT_SSH_PORT="${detected_port:-22}"
+  CURRENT_SSH_PORT="$(echo "${detected_port:-22}" | tr -d '[:space:]')"
   NEW_SSH_PORT="$CURRENT_SSH_PORT"
 
   confirm "Set up UFW firewall (allow SSH + Tailscale)?"   && SETUP_UFW=true        || SETUP_UFW=false
@@ -310,6 +310,30 @@ Match User ${pu}
   cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.bak.$(date +%s)"
   info "Backed up existing sshd_config."
 
+  # Detect OpenSSH version to pick compatible directives and algorithms.
+  # - sntrup761x25519 KEx was added in OpenSSH 8.5
+  # - ChallengeResponseAuthentication was removed in OpenSSH 9.0
+  local openssh_version openssh_major openssh_minor
+  openssh_version="$(ssh -V 2>&1 | grep -oP 'OpenSSH_\K[0-9]+\.[0-9]+')"
+  openssh_major="$(echo "$openssh_version" | cut -d. -f1)"
+  openssh_minor="$(echo "$openssh_version" | cut -d. -f2)"
+  info "Detected OpenSSH ${openssh_version}"
+
+  local kex_algorithms
+  if (( openssh_major > 8 || ( openssh_major == 8 && openssh_minor >= 5 ) )); then
+    kex_algorithms="sntrup761x25519-sha512@openssh.com,curve25519-sha256@libssh.org,curve25519-sha256"
+  else
+    kex_algorithms="curve25519-sha256@libssh.org,curve25519-sha256"
+    info "OpenSSH < 8.5 — sntrup761 KEx skipped."
+  fi
+
+  # ChallengeResponseAuthentication was removed in OpenSSH 9.0;
+  # KbdInteractiveAuthentication covers it fully in 9.x+.
+  local challenge_response_line=""
+  if (( openssh_major < 9 )); then
+    challenge_response_line="ChallengeResponseAuthentication no"
+  fi
+
   # Write the drop-in hardening file
   cat > /etc/ssh/sshd_config.d/99-hardened.conf <<SSHEOF
 # ── Hardened SSH config (applied by server-setup.sh) ──
@@ -326,7 +350,7 @@ AuthorizedKeysFile .ssh/authorized_keys
 # Global: disable password auth (overridden per-user below if needed)
 PasswordAuthentication no
 PermitEmptyPasswords no
-ChallengeResponseAuthentication no
+${challenge_response_line}
 KbdInteractiveAuthentication no
 UsePAM yes
 
@@ -344,7 +368,7 @@ LoginGraceTime 30
 StrictModes yes
 
 # ── Crypto hardening ──
-KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256@libssh.org,curve25519-sha256
+KexAlgorithms ${kex_algorithms}
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
 HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
@@ -353,11 +377,17 @@ HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
 ${match_blocks}
 SSHEOF
 
-  # Validate the new config before committing
-  if sshd -t 2>/dev/null; then
+  # Validate the new config — show the actual errors if it fails
+  local sshd_errors
+  sshd_errors="$(sshd -t 2>&1)" && local sshd_ok=true || local sshd_ok=false
+
+  if [[ "$sshd_ok" == true ]]; then
     success "sshd_config hardened and validated."
   else
     error "sshd_config validation failed — rolling back."
+    echo ""
+    printf "${RED}%s${RESET}\n" "$sshd_errors"
+    echo ""
     rm -f /etc/ssh/sshd_config.d/99-hardened.conf
     exit 1
   fi
