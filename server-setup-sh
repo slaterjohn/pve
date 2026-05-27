@@ -46,13 +46,19 @@ confirm() {
   esac
 }
 
-# ── Root check ───────────────────────────────────────────────────────────────
+# ── Root check / sudo re-exec ────────────────────────────────────────────────
+#
+#  On a fresh Ubuntu server the default user is not root, but has sudo access.
+#  Rather than requiring the user to re-run manually, the script re-executes
+#  itself under sudo automatically if needed.
 
 check_root() {
   if [[ "$EUID" -ne 0 ]]; then
-    error "This script must be run as root."
+    info "This script needs root privileges — re-launching with sudo…"
     echo ""
-    info "Re-run with:  sudo bash $0"
+    exec sudo bash "$0" "$@"
+    # exec replaces this process; the lines below only run if exec fails
+    error "sudo failed. Please run:  sudo bash $0"
     exit 1
   fi
 }
@@ -583,7 +589,7 @@ LOGO
   TAILSCALE_IP=""
   TAILSCALE_HOSTNAME=""
 
-  check_root
+  check_root "$@"
   check_deps
   collect_user_config
   choose_options
