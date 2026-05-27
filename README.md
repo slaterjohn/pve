@@ -11,5 +11,5 @@ bash harden-server.sh
 Server setup script
 ```
 curl -fsSL https://raw.githubusercontent.com/slaterjohn/pve/refs/heads/main/server-setup.sh -o server-setup.sh
-bash server-setup.sh
+sudo bash server-setup.sh
 ```
